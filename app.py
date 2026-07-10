@@ -266,7 +266,11 @@ def summarize_with_claude(client: Anthropic, config: dict) -> tuple[str, float, 
 st.title("📺 YouTube動画 要約くん")
 st.write("YouTubeのURLを貼るだけで、動画の内容をAIが要約します。")
 
-api_key = os.environ.get("ANTHROPIC_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY")
+try:
+    secret_api_key = st.secrets["ANTHROPIC_API_KEY"]
+except Exception:
+    secret_api_key = None
+api_key = os.environ.get("ANTHROPIC_API_KEY") or secret_api_key
 if not api_key:
     st.error(
         "Claude APIキーが設定されていません。ローカルで動かす場合はプロジェクトフォルダの "
