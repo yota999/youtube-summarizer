@@ -1,15 +1,20 @@
+import concurrent.futures
 import os
+import random
 import re
 
+import requests
 import streamlit as st
 from anthropic import Anthropic
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     NoTranscriptFound,
+    RequestBlocked,
     TranscriptsDisabled,
     VideoUnavailable,
 )
+from youtube_transcript_api.proxies import GenericProxyConfig
 
 load_dotenv()
 
@@ -88,9 +93,77 @@ def extract_video_id(url: str) -> str | None:
     return None
 
 
+# クラウド(Streamlit Community Cloudなど)からのアクセスはYouTubeにブロックされることが
+# あるため、その場合だけ無料の公開プロキシを自動で探して経由する。
+# 無料プロキシは不安定なので、複数の候補を並行でテストして最初に繋がったものを使う。
+FREE_PROXY_SOURCES = [
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=3000&country=all&ssl=yes&anonymity=all",
+]
+PROXY_TEST_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+
+
+def _fetch_free_proxy_candidates(limit_per_source: int = 60) -> list[str]:
+    candidates: list[str] = []
+    for url in FREE_PROXY_SOURCES:
+        try:
+            response = requests.get(url, timeout=6)
+            lines = [line.strip() for line in response.text.splitlines() if line.strip()]
+            candidates.extend(lines[:limit_per_source])
+        except Exception:
+            continue
+    random.shuffle(candidates)
+    return candidates
+
+
+def _proxy_works(proxy: str, timeout: float = 5.0) -> bool:
+    try:
+        response = requests.get(
+            PROXY_TEST_URL,
+            proxies={"http": f"http://{proxy}", "https": f"http://{proxy}"},
+            timeout=timeout,
+        )
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+def find_working_proxy(max_candidates: int = 40, timeout: float = 5.0) -> str | None:
+    candidates = _fetch_free_proxy_candidates()[:max_candidates]
+    if not candidates:
+        return None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(_proxy_works, proxy, timeout): proxy for proxy in candidates}
+        for future in concurrent.futures.as_completed(futures, timeout=timeout + 3):
+            proxy = futures[future]
+            if future.result():
+                return proxy
+    return None
+
+
+def _build_api(proxy: str | None) -> YouTubeTranscriptApi:
+    if proxy is None:
+        return YouTubeTranscriptApi()
+    proxy_config = GenericProxyConfig(http_url=f"http://{proxy}", https_url=f"http://{proxy}")
+    return YouTubeTranscriptApi(proxy_config=proxy_config)
+
+
 def fetch_transcript(video_id: str) -> tuple[str, float]:
-    api = YouTubeTranscriptApi()
-    transcript_list = api.list(video_id)
+    cached_proxy = st.session_state.get("working_proxy")
+    api = _build_api(cached_proxy)
+
+    try:
+        transcript_list = api.list(video_id)
+    except Exception:
+        # 直接アクセスがブロックされたか、キャッシュ済みプロキシが死んだ可能性が高い。
+        # 無料プロキシを新しく探して1回だけ再挑戦する。
+        st.session_state.pop("working_proxy", None)
+        proxy = find_working_proxy()
+        if proxy is None:
+            raise
+        st.session_state["working_proxy"] = proxy
+        api = _build_api(proxy)
+        transcript_list = api.list(video_id)
 
     try:
         transcript = transcript_list.find_transcript(["ja", "ja-JP"])
@@ -292,13 +365,19 @@ if st.button("要約する", type="primary"):
         st.stop()
 
     try:
-        with st.spinner("字幕を取得しています..."):
+        with st.spinner("字幕を取得しています（混雑時は無料プロキシを探すため少し時間がかかります）..."):
             transcript_text, duration_minutes = fetch_transcript(video_id)
     except TranscriptsDisabled:
         st.error("この動画は字幕が無効になっているため、要約できません。")
         st.stop()
     except VideoUnavailable:
         st.error("動画が見つかりませんでした。URLを確認してください。")
+        st.stop()
+    except RequestBlocked:
+        st.error(
+            "YouTube側にアクセスをブロックされ、無料プロキシも見つかりませんでした。"
+            "少し時間をおいてもう一度試すか、うまくいかない場合は運営者に相談してください。"
+        )
         st.stop()
     except Exception as e:
         st.error(f"字幕の取得に失敗しました: {e}")

@@ -2,3 +2,4 @@ streamlit
 youtube-transcript-api
 anthropic
 python-dotenv
+requests
