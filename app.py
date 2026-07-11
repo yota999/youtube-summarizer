@@ -103,7 +103,7 @@ FREE_PROXY_SOURCES = [
 PROXY_TEST_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
 
 
-def _fetch_free_proxy_candidates(limit_per_source: int = 60) -> list[str]:
+def _fetch_free_proxy_candidates(limit_per_source: int = 150) -> list[str]:
     candidates: list[str] = []
     for url in FREE_PROXY_SOURCES:
         try:
@@ -128,16 +128,21 @@ def _proxy_works(proxy: str, timeout: float = 5.0) -> bool:
         return False
 
 
-def find_working_proxy(max_candidates: int = 40, timeout: float = 5.0) -> str | None:
+def find_working_proxy(max_candidates: int = 150, timeout: float = 4.0) -> str | None:
+    # 無料プロキシは生きているものが少ない（数%程度）ので、候補数を多めに、
+    # 並列数も増やして、見つかる確率を上げる。
     candidates = _fetch_free_proxy_candidates()[:max_candidates]
     if not candidates:
         return None
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=75) as executor:
         futures = {executor.submit(_proxy_works, proxy, timeout): proxy for proxy in candidates}
-        for future in concurrent.futures.as_completed(futures, timeout=timeout + 3):
-            proxy = futures[future]
-            if future.result():
-                return proxy
+        try:
+            for future in concurrent.futures.as_completed(futures, timeout=timeout + 8):
+                proxy = futures[future]
+                if future.result():
+                    return proxy
+        except concurrent.futures.TimeoutError:
+            pass
     return None
 
 
